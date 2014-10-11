@@ -1,8 +1,7 @@
-use libc::{c_int, c_void, c_char, c_long};
+use libc::{c_int, c_void, c_long};
 use std::io::{IoResult, IoError, EndOfFile, Stream, Reader, Writer};
 use std::mem;
 use std::ptr;
-use std::rt::mutex::NativeMutex;
 use std::string;
 use sync::one::{Once, ONCE_INIT};
 
@@ -14,31 +13,6 @@ use x509::{X509StoreContext, X509FileType};
 pub mod error;
 #[cfg(test)]
 mod tests;
-
-static mut VERIFY_IDX: c_int = -1;
-static mut MUTEXES: *mut Vec<NativeMutex> = 0 as *mut Vec<NativeMutex>;
-
-fn init() {
-    static mut INIT: Once = ONCE_INIT;
-
-    unsafe {
-        INIT.doit(|| {
-            ffi::SSL_library_init();
-            ffi::SSL_load_error_strings();
-            ffi::ERR_load_crypto_strings();
-            let verify_idx = ffi::SSL_CTX_get_ex_new_index(0, ptr::null(), None,
-                                                           None, None);
-            assert!(verify_idx >= 0);
-            VERIFY_IDX = verify_idx;
-
-            let num_locks = ffi::CRYPTO_num_locks();
-            let mutexes = box Vec::from_fn(num_locks as uint, |_| NativeMutex::new());
-            MUTEXES = mem::transmute(mutexes);
-
-            ffi::CRYPTO_set_locking_callback(locking_function);
-        });
-    }
-}
 
 /// Determines the SSL method supported
 #[deriving(Show, Hash, PartialEq, Eq)]
@@ -110,26 +84,13 @@ fn get_verify_data_idx<T>() -> c_int {
     }
 }
 
-extern fn locking_function(mode: c_int, n: c_int, _file: *const c_char,
-                               _line: c_int) {
-    unsafe {
-        let mutex = (*MUTEXES).get_mut(n as uint);
-
-        if mode & ffi::CRYPTO_LOCK != 0 {
-            mutex.lock_noguard();
-        } else {
-            mutex.unlock_noguard();
-        }
-    }
-}
-
 extern fn raw_verify(preverify_ok: c_int, x509_ctx: *mut ffi::X509_STORE_CTX)
         -> c_int {
     unsafe {
         let idx = ffi::SSL_get_ex_data_X509_STORE_CTX_idx();
         let ssl = ffi::X509_STORE_CTX_get_ex_data(x509_ctx, idx);
         let ssl_ctx = ffi::SSL_get_SSL_CTX(ssl);
-        let verify = ffi::SSL_CTX_get_ex_data(ssl_ctx, VERIFY_IDX);
+        let verify = ffi::SSL_CTX_get_ex_data(ssl_ctx, ffi::VERIFY_IDX);
         let verify: Option<VerifyCallback> = mem::transmute(verify);
 
         let ctx = X509StoreContext::new(x509_ctx);
@@ -148,7 +109,7 @@ extern fn raw_verify_with_data<T>(preverify_ok: c_int,
         let ssl = ffi::X509_STORE_CTX_get_ex_data(x509_ctx, idx);
         let ssl_ctx = ffi::SSL_get_SSL_CTX(ssl);
 
-        let verify = ffi::SSL_CTX_get_ex_data(ssl_ctx, VERIFY_IDX);
+        let verify = ffi::SSL_CTX_get_ex_data(ssl_ctx, ffi::VERIFY_IDX);
         let verify: Option<VerifyCallbackData<T>> = mem::transmute(verify);
 
         let data = ffi::SSL_CTX_get_ex_data(ssl_ctx, get_verify_data_idx::<T>());
@@ -204,7 +165,7 @@ impl Drop for SslContext {
 impl SslContext {
     /// Creates a new SSL context.
     pub fn new(method: SslMethod) -> Result<SslContext, SslError> {
-        init();
+        ffi::init();
 
         let ctx = unsafe { ffi::SSL_CTX_new(method.to_raw()) };
         if ctx == ptr::null_mut() {
@@ -218,7 +179,7 @@ impl SslContext {
     pub fn set_verify(&mut self, mode: SslVerifyMode,
                       verify: Option<VerifyCallback>) {
         unsafe {
-            ffi::SSL_CTX_set_ex_data(self.ctx, VERIFY_IDX,
+            ffi::SSL_CTX_set_ex_data(self.ctx, ffi::VERIFY_IDX,
                                      mem::transmute(verify));
             ffi::SSL_CTX_set_verify(self.ctx, mode as c_int, Some(raw_verify));
         }
@@ -233,7 +194,7 @@ impl SslContext {
                                    data: T) {
         let data = box data;
         unsafe {
-            ffi::SSL_CTX_set_ex_data(self.ctx, VERIFY_IDX,
+            ffi::SSL_CTX_set_ex_data(self.ctx, ffi::VERIFY_IDX,
                                      mem::transmute(Some(verify)));
             ffi::SSL_CTX_set_ex_data(self.ctx, get_verify_data_idx::<T>(),
                                      mem::transmute(data));

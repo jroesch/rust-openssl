@@ -58,6 +58,7 @@ impl SslError {
     /// Creates a new `OpenSslErrors` with the current contents of the error
     /// stack.
     pub fn get() -> SslError {
+        ffi::init();
         let mut errs = vec!();
         loop {
             match unsafe { ffi::ERR_get_error() } {

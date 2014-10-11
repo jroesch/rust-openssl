@@ -2,6 +2,9 @@
 #![allow(dead_code)]
 use libc::{c_void, c_int, c_char, c_ulong, c_long, c_uint, c_uchar, size_t};
 use std::ptr;
+use std::mem;
+use std::rt::mutex::NativeMutex;
+use sync::one::{Once, ONCE_INIT};
 
 pub use bn::BIGNUM;
 
@@ -184,6 +187,45 @@ extern { }
 // Functions converted from macros
 pub unsafe fn BIO_eof(b: *mut BIO) -> bool {
     BIO_ctrl(b, BIO_CTRL_EOF, 0, ptr::null_mut()) == 1
+}
+
+// Initialization of the resources needed by FFI, such as error strings.
+pub static mut VERIFY_IDX: c_int = -1;
+pub static mut MUTEXES: *mut Vec<NativeMutex> = 0 as *mut Vec<NativeMutex>;
+
+pub fn init() {
+    static mut INIT: Once = ONCE_INIT;
+
+    unsafe {
+        INIT.doit(|| {
+            SSL_library_init();
+            SSL_load_error_strings();
+
+            let verify_idx = SSL_CTX_get_ex_new_index(0, ptr::null(), None,
+            None, None);
+            assert!(verify_idx >= 0);
+            VERIFY_IDX = verify_idx;
+
+            let num_locks = CRYPTO_num_locks();
+            let mutexes = box Vec::from_fn(num_locks as uint, |_| NativeMutex::new());
+                MUTEXES = mem::transmute(mutexes);
+
+                CRYPTO_set_locking_callback(locking_function);
+        });
+    }
+}
+
+extern fn locking_function(mode: c_int, n: c_int, _file: *const c_char,
+                               _line: c_int) {
+    unsafe {
+        let mutex = (*MUTEXES).get_mut(n as uint);
+
+        if mode & CRYPTO_LOCK != 0 {
+            mutex.lock_noguard();
+        } else {
+            mutex.unlock_noguard();
+        }
+    }
 }
 
 // True functions
